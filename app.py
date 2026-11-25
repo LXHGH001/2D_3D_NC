@@ -1,5 +1,4 @@
 import streamlit as st
-from streamlit_stl import stl_viewer
 import io
 import os
 import numpy as np
@@ -11,6 +10,7 @@ import cv2
 from shapely.geometry import Polygon
 from shapely.ops import unary_union
 import trimesh
+import base64
 
 # -------------------------- 页面配置 --------------------------
 st.set_page_config(page_title="图纸转3D-CAM", layout="wide")
@@ -25,6 +25,57 @@ if "process_text" not in st.session_state:
     st.session_state["process_text"] = ""
 if "gcode_text" not in st.session_state:
     st.session_state["gcode_text"] = ""
+
+# -------------------------- STL预览组件（原生iframe，不需要第三方包） --------------------------
+def stl_preview(stl_data: bytes, height=400):
+    """基于Three.js的STL预览，内嵌HTML，无额外依赖"""
+    stl_b64 = base64.b64encode(stl_data).decode()
+    html = f'''
+    <html>
+    <head>
+    <meta charset="utf-8">
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/loaders/STLLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+    <style>body{{margin:0;padding:0;overflow:hidden}}</style>
+    </head>
+    <body>
+    <script>
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xeeeeee);
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({{antialias:true}});
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        const light = new THREE.DirectionalLight(0xffffff, 1);
+        light.position.set(10,10,10);
+        scene.add(light);
+        scene.add(new THREE.AmbientLight(0xffffff,0.4));
+        const loader = new THREE.STLLoader();
+        const raw = atob("{stl_b64}");
+        const arr = new Uint8Array([...raw].map(c=>c.charCodeAt(0)));
+        const geom = loader.parse(arr.buffer);
+        const mat = new THREE.MeshStandardMaterial({{color:0x4488dd, metalness:0.1, roughness:0.6}});
+        const mesh = new THREE.Mesh(geom, mat);
+        scene.add(mesh);
+        geom.computeBoundingBox();
+        const box = geom.boundingBox;
+        const center = new THREE.Vector3();
+        box.getCenter(center);
+        mesh.position.sub(center);
+        const size = new THREE.Vector3();
+        box.getSize(size);
+        const maxDim = Math.max(size.x,size.y,size.z);
+        camera.position.z = maxDim * 1.8;
+        function animate(){{requestAnimationFrame(animate);controls.update();renderer.render(scene,camera);}}
+        animate();
+    </script>
+    </body>
+    </html>
+    '''
+    st.components.v1.html(html, height=height, scrolling=False)
 
 # -------------------------- 工具函数 --------------------------
 def parse_dxf(dxf_bytes: bytes):
@@ -58,12 +109,6 @@ def parse_pdf(pdf_bytes: bytes):
             lines = page.lines
             if not lines:
                 raise Exception("无矢量线条，切换图片模式")
-            pts_list = []
-            for line in lines:
-                x0, y0 = line["x0"], line["y0"]
-                x1, y1 = line["x1"], line["y1"]
-                pts_list.append([(x0, y0), (x1, y1)])
-            # 简单闭合轮廓（原型简化，复杂图纸需要轮廓连接算法）
             st.warning("矢量PDF：圆弧会被拆成折线，建议DXF优先")
             dummy_poly = Polygon([(0,0),(200,0),(200,120),(0,120)])
             mesh = trimesh.creation.extrude_polygon(dummy_poly, 10)
@@ -153,7 +198,7 @@ col1, col2 = st.columns(2)
 with col1:
     st.subheader("3D模型预览")
     if st.session_state["stl_bytes"] is not None:
-        stl_viewer(st.session_state["stl_bytes"], height=400)
+        stl_preview(st.session_state["stl_bytes"], height=400)
         st.download_button("📥 下载STL模型文件", data=st.session_state["stl_bytes"], file_name="part.stl")
 
 with col2:
