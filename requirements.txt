@@ -7,3 +7,4 @@ ezdxf
 shapely
 trimesh
 numpy
+networkx
