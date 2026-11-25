@@ -1,10 +1,10 @@
 streamlit
 pdfplumber
 pdf2image
-pytesseract
 opencv-python-headless
 ezdxf
 shapely
 trimesh
 numpy
 networkx
+mapbox-earcut
