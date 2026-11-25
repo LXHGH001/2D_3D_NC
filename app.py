@@ -8,7 +8,7 @@ import cv2
 import trimesh
 import shapely
 from shapely.geometry import Polygon
-import base64
+from streamlit_stl_viewer import stl_viewer
 
 # -------------------------- 页面配置 --------------------------
 st.set_page_config(page_title="图纸转3D&NC", layout="wide")
@@ -24,56 +24,6 @@ if "process_text" not in st.session_state:
 if "gcode_text" not in st.session_state:
     st.session_state["gcode_text"] = ""
 
-# -------------------------- STL预览（内嵌Three.js，无额外依赖） --------------------------
-def stl_preview(stl_data: bytes, height=400):
-    stl_b64 = base64.b64encode(stl_data).decode()
-    html = f'''
-    <html>
-    <head>
-    <meta charset="utf-8">
-    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/loaders/STLLoader.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
-    <style>body{{margin:0;padding:0;overflow:hidden}}</style>
-    </head>
-    <body>
-    <script>
-        const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0xeeeeee);
-        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-        const renderer = new THREE.WebGLRenderer({{antialias:true}});
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        document.body.appendChild(renderer.domElement);
-        const controls = new THREE.OrbitControls(camera, renderer.domElement);
-        controls.enableDamping = true;
-        const light = new THREE.DirectionalLight(0xffffff, 1);
-        light.position.set(10,10,10);
-        scene.add(light);
-        scene.add(new THREE.AmbientLight(0xffffff,0.4));
-        const loader = new THREE.STLLoader();
-        const raw = atob("{stl_b64}");
-        const arr = new Uint8Array([...raw].map(c=>c.charCodeAt(0)));
-        const geom = loader.parse(arr.buffer);
-        const mat = new THREE.MeshStandardMaterial({{color:0x4488dd, metalness:0.1, roughness:0.6}});
-        const mesh = new THREE.Mesh(geom, mat);
-        scene.add(mesh);
-        geom.computeBoundingBox();
-        const box = geom.boundingBox;
-        const center = new THREE.Vector3();
-        box.getCenter(center);
-        mesh.position.sub(center);
-        const size = new THREE.Vector3();
-        box.getSize(size);
-        const maxDim = Math.max(size.x,size.y,size.z);
-        camera.position.z = maxDim * 1.8;
-        function animate(){{requestAnimationFrame(animate);controls.update();renderer.render(scene,camera);}}
-        animate();
-    </script>
-    </body>
-    </html>
-    '''
-    st.components.v1.html(html, height=height, scrolling=False)
-
 # -------------------------- DXF解析函数 --------------------------
 def parse_dxf(dxf_bytes: bytes):
     stream = io.BytesIO(dxf_bytes)
@@ -88,14 +38,13 @@ def parse_dxf(dxf_bytes: bytes):
                 polygons.append(poly)
     if not polygons:
         return None
-    # 合并多边形
     union_poly = shapely.unary_union(polygons)
     if isinstance(union_poly, Polygon):
         mesh = trimesh.creation.extrude_polygon(union_poly, height=10.0)
         return mesh
     return None
 
-# -------------------------- PDF解析函数 --------------------------
+# -------------------------- PDF解析函数（修复矩形顶点顺序） --------------------------
 def parse_pdf(pdf_bytes: bytes):
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -104,8 +53,8 @@ def parse_pdf(pdf_bytes: bytes):
             if not lines:
                 raise Exception("无矢量线条，切换图片模式")
             st.warning("矢量PDF：圆弧会被拆成折线，建议DXF优先")
-            # 测试矩形
-            poly = Polygon([(0,0),(200,0),(200,120),(200,120),(0,120)])
+            # 修复：正确闭合矩形
+            poly = Polygon([(0,0),(200,0),(200,120),(0,120)])
             mesh = trimesh.creation.extrude_polygon(poly, height=10.0)
             return mesh
     except Exception:
@@ -185,12 +134,14 @@ if uploaded_file is not None:
         stl_bytes = stl_buf.read()
         st.session_state["stl_bytes"] = stl_bytes
         st.success("✅ 3D模型生成完成")
+        st.info(f"模型信息：顶点数 {len(mesh.vertices)}，面数 {len(mesh.faces)}")
 
 col1, col2 = st.columns(2)
 with col1:
     st.subheader("3D模型预览")
     if st.session_state["stl_bytes"] is not None:
-        stl_preview(st.session_state["stl_bytes"], height=400)
+        # 用稳定的 stl-viewer 组件
+        stl_viewer(st.session_state["stl_bytes"], height=400)
         st.download_button("📥 下载STL模型", data=st.session_state["stl_bytes"], file_name="part.stl")
 
 with col2:
