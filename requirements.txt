@@ -1,0 +1,10 @@
+streamlit
+streamlit-stl
+pdfplumber
+pdf2image
+pytesseract
+opencv-python
+ezdxf
+shapely
+trimesh
+numpy
