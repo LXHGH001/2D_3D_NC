@@ -6,15 +6,12 @@ import pdfplumber
 from pdf2image import convert_from_bytes
 import cv2
 import trimesh
-import shapely
 from shapely.geometry import Polygon
-from streamlit_stl_viewer import stl_viewer
+import base64
 
-# -------------------------- 页面配置 --------------------------
 st.set_page_config(page_title="图纸转3D&NC", layout="wide")
 st.title("📐 工程图(PDF/DXF) → 三维模型 → 加工工艺 → NC代码")
 
-# 状态缓存
 if "mesh" not in st.session_state:
     st.session_state["mesh"] = None
 if "stl_bytes" not in st.session_state:
@@ -24,38 +21,102 @@ if "process_text" not in st.session_state:
 if "gcode_text" not in st.session_state:
     st.session_state["gcode_text"] = ""
 
-# -------------------------- DXF解析函数 --------------------------
+def stl_preview_safe(stl_data: bytes, height=400):
+    try:
+        stl_b64 = base64.b64encode(stl_data).decode()
+        html = f'''
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/loaders/STLLoader.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+        <style>body{{margin:0;padding:0;overflow:hidden}}</style>
+        </head>
+        <body>
+        <script>
+            const scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xeeeeee);
+            const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 2000);
+            const renderer = new THREE.WebGLRenderer({{antialias:true}});
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+            const controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            scene.add(new THREE.DirectionalLight(0xffffff,1));
+            scene.add(new THREE.AmbientLight(0xffffff,0.4));
+            const loader = new THREE.STLLoader();
+            const raw = atob("{stl_b64}");
+            const arr = new Uint8Array([...raw].map(c=>c.charCodeAt(0)));
+            const geom = loader.parse(arr.buffer);
+            const mat = new THREE.MeshStandardMaterial({{color:0x4488dd, metalness:0.1, roughness:0.6}});
+            const mesh = new THREE.Mesh(geom, mat);
+            scene.add(mesh);
+            geom.computeBoundingBox();
+            const box = geom.boundingBox;
+            const center = new THREE.Vector3();
+            box.getCenter(center);
+            mesh.position.sub(center);
+            const size = new THREE.Vector3();
+            box.getSize(size);
+            const maxDim = Math.max(size.x,size.y,size.z);
+            camera.position.z = maxDim * 1.8;
+            function animate(){{requestAnimationFrame(animate);controls.update();renderer.render(scene,camera);}}
+            animate();
+        </script>
+        </body>
+        </html>
+        '''
+        st.components.v1.html(html, height=height, scrolling=False)
+    except Exception as e:
+        st.warning("3D预览渲染失败，但是STL文件可以正常下载，用其他软件打开查看模型")
+
+# 手动拉伸轮廓，不依赖earcut
+def extrude_contour(pts, thickness=10.0):
+    pts = np.array(pts, dtype=np.float64)
+    if len(pts) < 3:
+        return None
+    n = len(pts)
+    verts_top = np.hstack([pts, np.full((n,1), thickness)])
+    verts_bot = np.hstack([pts, np.zeros((n,1))])
+    verts = np.vstack([verts_bot, verts_top])
+    faces = []
+    # 侧面
+    for i in range(n):
+        j = (i+1) % n
+        faces.append([i, j, n+j])
+        faces.append([i, n+j, n+i])
+    # 底面
+    bot_tri = [[0, i, i+1] for i in range(1, n-1)]
+    # 顶面
+    top_tri = [[n, n+i+1, n+i] for i in range(1, n-1)]
+    faces.extend(bot_tri)
+    faces.extend(top_tri)
+    faces = np.array(faces, dtype=np.int32)
+    mesh = trimesh.Trimesh(vertices=verts, faces=faces, validate=True)
+    return mesh
+
 def parse_dxf(dxf_bytes: bytes):
     stream = io.BytesIO(dxf_bytes)
     doc = ezdxf.read(stream)
     msp = doc.modelspace()
-    polygons = []
     for entity in msp:
         if entity.dxftype() == "LWPOLYLINE":
-            pts = np.array([(p[0], p[1]) for p in entity.get_points()])
-            poly = Polygon(pts)
-            if poly.is_valid:
-                polygons.append(poly)
-    if not polygons:
-        return None
-    union_poly = shapely.unary_union(polygons)
-    if isinstance(union_poly, Polygon):
-        mesh = trimesh.creation.extrude_polygon(union_poly, height=10.0)
-        return mesh
+            pts = [(p[0], p[1]) for p in entity.get_points()]
+            mesh = extrude_contour(pts, thickness=10.0)
+            return mesh
     return None
 
-# -------------------------- PDF解析函数（修复矩形顶点顺序） --------------------------
 def parse_pdf(pdf_bytes: bytes):
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             page = pdf.pages[0]
             lines = page.lines
             if not lines:
-                raise Exception("无矢量线条，切换图片模式")
+                raise Exception("矢量线条为空，切换图片模式")
             st.warning("矢量PDF：圆弧会被拆成折线，建议DXF优先")
-            # 修复：正确闭合矩形
-            poly = Polygon([(0,0),(200,0),(200,120),(0,120)])
-            mesh = trimesh.creation.extrude_polygon(poly, height=10.0)
+            pts = [(0,0),(200,0),(200,120),(0,120)]
+            mesh = extrude_contour(pts, thickness=10.0)
             return mesh
     except Exception:
         imgs = convert_from_bytes(pdf_bytes)
@@ -68,13 +129,10 @@ def parse_pdf(pdf_bytes: bytes):
             return None
         idx = np.argmax(areas)
         cnt = contours[idx].squeeze()
-        poly = Polygon(cnt)
-        if not poly.is_valid:
-            poly = poly.buffer(0)
-        mesh = trimesh.creation.extrude_polygon(poly, height=10.0)
+        pts = cnt.tolist()
+        mesh = extrude_contour(pts, thickness=10.0)
         return mesh
 
-# -------------------------- 工艺、G代码生成 --------------------------
 def generate_process(mesh: trimesh.Trimesh) -> str:
     bbox = mesh.bounding_box.extents
     x, y, z = bbox
@@ -112,7 +170,6 @@ M30
 """
     return gcode
 
-# -------------------------- 页面交互逻辑 --------------------------
 uploaded_file = st.file_uploader("上传工程图（支持 .dxf / .pdf）", type=["dxf", "pdf"])
 
 if uploaded_file is not None:
@@ -140,8 +197,7 @@ col1, col2 = st.columns(2)
 with col1:
     st.subheader("3D模型预览")
     if st.session_state["stl_bytes"] is not None:
-        # 用稳定的 stl-viewer 组件
-        stl_viewer(st.session_state["stl_bytes"], height=400)
+        stl_preview_safe(st.session_state["stl_bytes"], height=400)
         st.download_button("📥 下载STL模型", data=st.session_state["stl_bytes"], file_name="part.stl")
 
 with col2:
