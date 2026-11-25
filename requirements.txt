@@ -8,3 +8,4 @@ trimesh
 numpy
 networkx
 mapbox-earcut
+streamlit-stl-viewer
