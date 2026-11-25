@@ -69,9 +69,9 @@ def stl_preview_safe(stl_data: bytes, height=400):
         '''
         st.components.v1.html(html, height=height, scrolling=False)
     except Exception as e:
-        st.warning("3D预览渲染失败，但是STL文件可以正常下载，用其他软件打开查看模型")
+        st.warning("3D预览渲染失败，STL文件可正常下载，用其他软件打开查看模型")
 
-# 手动拉伸轮廓，不依赖earcut
+# 手动拉伸轮廓，validate=False，避开scipy依赖
 def extrude_contour(pts, thickness=10.0):
     pts = np.array(pts, dtype=np.float64)
     if len(pts) < 3:
@@ -86,14 +86,14 @@ def extrude_contour(pts, thickness=10.0):
         j = (i+1) % n
         faces.append([i, j, n+j])
         faces.append([i, n+j, n+i])
-    # 底面
-    bot_tri = [[0, i, i+1] for i in range(1, n-1)]
-    # 顶面
-    top_tri = [[n, n+i+1, n+i] for i in range(1, n-1)]
-    faces.extend(bot_tri)
-    faces.extend(top_tri)
+    # 底面（顺时针）
+    for i in range(1, n-1):
+        faces.append([0, i+1, i])
+    # 顶面（逆时针）
+    for i in range(1, n-1):
+        faces.append([n, n+i, n+i+1])
     faces = np.array(faces, dtype=np.int32)
-    mesh = trimesh.Trimesh(vertices=verts, faces=faces, validate=True)
+    mesh = trimesh.Trimesh(vertices=verts, faces=faces, validate=False)
     return mesh
 
 def parse_dxf(dxf_bytes: bytes):
