@@ -4,9 +4,10 @@ import numpy as np
 import ezdxf
 import pdfplumber
 from pdf2image import convert_from_bytes
-import pytesseract
 import cv2
 import trimesh
+import shapely
+from shapely.geometry import Polygon
 import base64
 
 # -------------------------- 页面配置 --------------------------
@@ -78,17 +79,21 @@ def parse_dxf(dxf_bytes: bytes):
     stream = io.BytesIO(dxf_bytes)
     doc = ezdxf.read(stream)
     msp = doc.modelspace()
-    paths = []
+    polygons = []
     for entity in msp:
         if entity.dxftype() == "LWPOLYLINE":
             pts = np.array([(p[0], p[1]) for p in entity.get_points()])
-            path = trimesh.load_path(pts)
-            paths.append(path)
-    if not paths:
+            poly = Polygon(pts)
+            if poly.is_valid:
+                polygons.append(poly)
+    if not polygons:
         return None
-    union_path = trimesh.path.util.concatenate(paths)
-    mesh = union_path.extrude(height=10.0)
-    return mesh
+    # 合并多边形
+    union_poly = shapely.unary_union(polygons)
+    if isinstance(union_poly, Polygon):
+        mesh = trimesh.creation.extrude_polygon(union_poly, height=10.0)
+        return mesh
+    return None
 
 # -------------------------- PDF解析函数 --------------------------
 def parse_pdf(pdf_bytes: bytes):
@@ -99,9 +104,9 @@ def parse_pdf(pdf_bytes: bytes):
             if not lines:
                 raise Exception("无矢量线条，切换图片模式")
             st.warning("矢量PDF：圆弧会被拆成折线，建议DXF优先")
-            pts = np.array([(0,0),(200,0),(200,120),(0,120)])
-            path = trimesh.load_path(pts)
-            mesh = path.extrude(height=10.0)
+            # 测试矩形
+            poly = Polygon([(0,0),(200,0),(200,120),(200,120),(0,120)])
+            mesh = trimesh.creation.extrude_polygon(poly, height=10.0)
             return mesh
     except Exception:
         imgs = convert_from_bytes(pdf_bytes)
@@ -114,8 +119,10 @@ def parse_pdf(pdf_bytes: bytes):
             return None
         idx = np.argmax(areas)
         cnt = contours[idx].squeeze()
-        path = trimesh.load_path(cnt)
-        mesh = path.extrude(height=10.0)
+        poly = Polygon(cnt)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        mesh = trimesh.creation.extrude_polygon(poly, height=10.0)
         return mesh
 
 # -------------------------- 工艺、G代码生成 --------------------------
