@@ -2,7 +2,7 @@ streamlit
 pdfplumber
 pdf2image
 pytesseract
-opencv-python
+opencv-python-headless
 ezdxf
 shapely
 trimesh
